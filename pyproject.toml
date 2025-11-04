@@ -1,0 +1,47 @@
+[build-system]
+requires      = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spotifai"
+version = "0.0.1"
+description = "Generador de playlist de Spotify con IA"
+readme = "README.md"
+authors = [
+    { name = "Fran Vargas", email = "francisco.vargas.ruiz@gmail.com" }
+]
+license = { file = "LICENSE" }
+classifiers = [
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",    
+]
+keywords = ["spotify", "llm", "ai", "playlist", "music", "manager"]
+dependencies = [
+    "deepagents",           # Agentes con LLMs
+    "langchain",            # Langchain framework
+    "langchain-openai",     # Soporte de OpenAI en Langchain
+    "langchain-ollama",     # Soporte de Ollama en Langchain
+    "langgraph",            # Herramientas para construir aplicaciones con LLMs
+    "langgraph-prebuilt",   # Componentes preconstruidos para LangGraph
+    "python-dotenv",        # Carga de variables desde .env
+    "spotipy",              # Spotify Web API
+    "fastapi",              # Servidor web para callback OAuth
+    "uvicorn",              # ASGI server para FastAPI
+]
+requires-python = ">=3.12"
+
+[project.optional-dependencies]
+dev = ["black", "bumpver", "isort", "pip-tools", "pytest"]
+
+[project.urls]
+Home = "https://github.com/falkenslab/spotifai"
+Documentation = "https://github.com/falkenslab/spotifai/blob/main/README.md"
+Source = "https://github.com/falkenslab/spotifai"
+Issues = "https://github.com/falkenslab/spotifai/issues"
+
+[project.scripts]
+spotifai = "spotifai.__main__:main"
+
+[tool.setuptools]
+include-package-data = true
