@@ -39,7 +39,7 @@ class SpotifyManager:
             code = run_mini_auth_https_server()
             # Intercambiar el código por un token de acceso
             token_info = self.auth_manager.get_access_token(code)
-            print("🔓 Autenticación completada.")
+            print("🔓 Autenticación completada\n")
 
         # Crear el cliente de Spotify con el auth_manager (no el token directamente)
         self.client = spotipy.Spotify(auth_manager=self.auth_manager)

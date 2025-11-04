@@ -4,6 +4,7 @@ from langchain.chat_models import init_chat_model
 
 from spotifai.spotify_tools import init_spotify_manager
 
+from deepagent.chat import chat
 from deepagent.prompts import SYSTEM_PROMPT_TEMPLATE
 from deepagent.tool_formatter import generate_tools_description
 from deepagent.agent import DeepAgent
@@ -46,7 +47,12 @@ def main():
     )
 
     # Iniciar el chat con el agente
-    agent.chat("SpotifAgent", current_user)
+    chat(
+        agent=agent, 
+        agent_name="SpotifAgent", 
+        human_name=current_user, 
+        intro="¡Hola! Soy tu asistente de IA para ayudarte a gestionar tus playlist de Spotify. ¿En qué puedo ayudarte hoy?"
+    )
 
 if __name__ == "__main__":
     main()
