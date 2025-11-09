@@ -13,7 +13,7 @@ class Status(Enum):
     DONE = "done"
 
 class AgentState(TypedDict):
-    user_query: str  # Consulta del usuario
+    human_query: str  # Consulta del usuario
     plan: Optional[Plan]  # Plan de acción del agente
     partial_results: Optional[dict[str, AnyMessage]]  # Resultados parciales de las acciones realizadas
     final_output: Optional[AnyMessage]  # Respuesta final generada por el agente

@@ -3,14 +3,16 @@ import json
 from typing import AsyncGenerator
 
 from langchain.chat_models.base import BaseChatModel
-from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
+from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage, AIMessage
 from langgraph.graph import StateGraph, END
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.checkpoint.memory import InMemorySaver
+from langchain.tools import tool
 
 from deepagent.plan import Plan
 from deepagent.prompts import PLAN_PROMPT_TEMPLATE
 from deepagent.state import AgentState, Status
+
 
 class DeepAgent:
     """
@@ -28,10 +30,10 @@ class DeepAgent:
         graph: grafo compilado de LangGraph que gestiona el flujo de mensajes.
         tools: diccionario de herramientas disponibles indexadas por nombre.
         model: modelo LLM con herramientas enlazadas mediante ``bind_tools``.
-        verbose: si es True, imprime mensajes de depuración y resultados de herramientas.        
+        verbose: si es True, imprime mensajes de depuración y resultados de herramientas.
     """
 
-    def __init__(self, model: BaseChatModel, tools, system: str = "", verbose: bool = False):
+    def __init__(self, model: BaseChatModel, tools: list[tool], system: str = "", verbose: bool = False):
         """
         Inicializa el agente con un modelo, herramientas y un prompt de sistema.
         Args:
@@ -43,8 +45,10 @@ class DeepAgent:
         self.system = SystemMessage(content=system) if system else None
         self.verbose = verbose
         self.config = {
-            "recursion_limit": 50,                              # Límite de recursión para evitar bucles infinitos en el grafo (para que no esté infinitamente dando vueltas)
-            "configurable": { "thread_id" : "1"}                # Identificador del hilo de conversación (en este caso, 1 agente sólo puede mantener una conversación a la vez)
+            "recursion_limit": 50,  # Límite de recursión para evitar bucles infinitos en el grafo (para que no esté infinitamente dando vueltas)
+            "configurable": {
+                "thread_id": "1"    # Identificador del hilo de conversación (en este caso, 1 agente sólo puede mantener una conversación a la vez)
+            },  
         }
 
         # Construcción del grafo de estados del agente
@@ -66,15 +70,13 @@ class DeepAgent:
         graph = StateGraph(AgentState)
 
         # Definición de nodos del grafo
-        graph.add_node("init", self.__initialize)                 # Nodo de inicialización del estado del agente
-        graph.add_node("planner", self.__plan)              # Nodo de planificación
-        graph.add_node("researcher", self.__research)       # Nodo de investigación
-        #graph.add_node("action", self.__take_action)              # Nodo de ejecución de herramientas (acciones)
+        graph.add_node("planner", self.__plan)  # Nodo de planificación
+        graph.add_node("researcher", self.__research)  # Nodo de investigación
+        # graph.add_node("action", self.__take_action)              # Nodo de ejecución de herramientas (acciones)
 
         # Definición de aristas del grafo
-        graph.add_edge("init", "planner")                   # Desde el estado inicial, ir al modelo
-        graph.add_edge("planner", "researcher")             # Desde el modelo, ir a investigar
-        graph.add_edge("researcher", END)                      # Si el modelo no pide herramientas, terminar
+        graph.add_edge("planner", "researcher")  # Desde el modelo, ir a investigar
+        graph.add_edge("researcher", END)  # Si el modelo no pide herramientas, terminar
         ##graph.add_conditional_edges(
         ##    "llm",                                              # La arista condicional sale del nodo "llm"
         ##    self.__exists_action,                                 # Función que decide si se debe ir al nodo de acción o terminar
@@ -83,11 +85,10 @@ class DeepAgent:
         ##graph.add_edge("action", "llm")                         # Después de ejecutar una acción, volver al modelo
 
         # Definición del punto de entrada del grafo
-        graph.set_entry_point("init")
+        graph.set_entry_point("planner")
 
         # Compilación del grafo para su ejecución con checkpointer en memoria (guarda el estado en memoria)
         return graph.compile(checkpointer=InMemorySaver())
-    
 
     def __call_tool(self, tool_call) -> ToolMessage:
         """
@@ -110,22 +111,10 @@ class DeepAgent:
             # Ejecutar la herramienta y obtener el resultado
             result = self.tools[tool_call["name"]].invoke(tool_call["args"])
         # Devuelve un mensaje de tipo ToolMessage con el resultado de ejecutar la herramienta
-        return ToolMessage(tool_call_id=tool_call["id"], name=tool_call["name"], content=str(result))
-    
+        return ToolMessage(
+            tool_call_id=tool_call["id"], name=tool_call["name"], content=str(result)
+        )
 
-    def __initialize(self, state: AgentState) -> AgentState:
-        """
-        Crea el estado inicial del agente con el mensaje de sistema.
-        Returns:
-            Un estado inicial con el mensaje de sistema si está configurado.
-        """
-        return {
-            "messages": [ self.system ] if self.system else [],
-            "user_query": state["messages"][-1].content,
-            "status": Status.OK
-        }
-    
-    
     def __plan(self, state: AgentState) -> AgentState:
         """
         Genera un plan de acción basado en la consulta del usuario.
@@ -134,28 +123,58 @@ class DeepAgent:
         Returns:
             Un estado actualizado con el plan de acción.
         """
-        query = PLAN_PROMPT_TEMPLATE.format(task=state["user_query"])
+        plan_prompt = SystemMessage(content=f"""
+Quiero que actúes como un planificador.
+
+# Objetivo
+Generar un plan paso a paso para conseguir ese objetivo en formato JSON.
+
+# Instrucciones
+1) Crea un plan numerado, claro y ordenado.
+2) Cada paso debe ser concreto, accionable y comprensible.
+3) Si faltan datos, pide aclaraciones antes de seguir.
+4) Si hay varias formas de hacerlo, elige la más sencilla y eficiente.
+
+# Formato de respuesta
+Responde ÚNICAMENTE con un JSON válido con esta estructura:
+
+```json
+["paso 1", "paso 2", "paso 3"]
+```
+
+# Requerimientos adicionales
+NO uses markdown, NO expliques nada, SOLO el JSON.
+""")
 
         # Invocar el modelo para obtener el plan
-        messages = state["messages"] + [SystemMessage(content=query)]
+        messages = state["messages"] + [plan_prompt]
         message = self.model.invoke(messages)
-        
+
         try:
             # Intentar parsear el JSON directamente
-            plan_data = json.loads(message.content.strip())
-            plan = Plan(**plan_data)
-            plan.current_step = 0  # Reiniciar el paso actual
-        except (json.JSONDecodeError, Exception) as e:
-            # Plan por defecto en caso de error
             plan = Plan(
-                steps=["Analizar la consulta del usuario", "Ejecutar acciones necesarias", "Proporcionar respuesta"],
+                steps=json.loads(message.content.strip()),
                 current_step=0
             )
+        except (json.JSONDecodeError, Exception) as e:
+            if self.verbose:
+                print(f"⚠️ Error al parsear plan: {e}")
+                print(f"Contenido recibido: {message.content}")
+            # Plan por defecto en caso de error
+            plan = Plan(
+                steps=[
+                    "Analizar la consulta del usuario",
+                    "Ejecutar acciones necesarias",
+                    "Proporcionar respuesta",
+                ],
+                current_step=0,
+            )
+        return {
+            "plan": plan,
+            "messages": messages,
+            "status": Status.OK
+        }
 
-        state["plan"] = plan
-        state["messages"] = messages + message
-        return state
-    
     def __research(self, state: AgentState) -> AgentState:
         """
         Realiza una investigación basada en el plan de acción.
@@ -165,14 +184,23 @@ class DeepAgent:
             Un estado actualizado con los resultados de la investigación.
         """
         plan: Plan = state["plan"]
+        
         if plan.current_step < len(plan.steps):
             step = plan.steps[plan.current_step]
-            # Aquí se podría implementar la lógica de investigación
-            print(f"Investigando: {step}")
+            
+            if self.verbose:
+                print(f"🔍 Investigando paso {plan.current_step + 1}/{len(plan.steps)}: {step}")
+            
             # Por ahora, simplemente avanzamos al siguiente paso
             plan.current_step += 1
+            
+            # Actualizar el plan en el estado
             state["plan"] = plan
-        return state
+        
+        return {
+            "plan": state["plan"],
+            "status": Status.OK
+        }
 
     def __summarize(self, state: AgentState) -> AgentState:
         """
@@ -208,13 +236,13 @@ class DeepAgent:
         Genera una respuesta final coherente para el usuario.
         """
 
-        messages = state["messages"] + [HumanMessage(content=summary_prompt)]
+        messages = state.messages + [HumanMessage(content=summary_prompt)]
         final_response = self.model.invoke(messages)
 
         # Actualizar el estado con la respuesta final
-        state["final_output"] = final_response
-        state["messages"] = messages + [final_response]
-        state["status"] = Status.DONE
+        state.final_output = final_response
+        state.messages = messages + [final_response]
+        state.status = Status.DONE
 
         if self.verbose:
             print("✅ Resumen completado")
@@ -228,9 +256,10 @@ class DeepAgent:
         Returns:
             ``True`` si el último mensaje del modelo incluye ``tool_calls``; en caso contrario ``False``.
         """
-        result = state["messages"][-1]          # Último mensaje generado por el modelo
-        return len(result.tool_calls) > 0       # Devuelve True si hay llamadas a herramientas en el último mensaje
-    
+        result = state["messages"][-1]  # Último mensaje generado por el modelo
+        return (
+            len(result.tool_calls) > 0
+        )  # Devuelve True si hay llamadas a herramientas en el último mensaje
 
     def __call_model(self, state: AgentState) -> AgentState:
         """
@@ -244,7 +273,6 @@ class DeepAgent:
         messages = state["messages"]
         message = self.model.invoke(messages)
         return {"messages": [message]}
-    
 
     def __take_action(self, state: AgentState) -> AgentState:
         """
@@ -272,16 +300,18 @@ class DeepAgent:
         plan: Plan = state.get("plan")
         if not plan:
             return False
-        
+
         # Continuar si hay más pasos por ejecutar
         should_continue = plan.current_step < len(plan.steps)
-        
+
         if self.verbose:
             if should_continue:
-                print(f"🔄 Continuando investigación - Paso {plan.current_step + 1}/{len(plan.steps)}")
+                print(
+                    f"🔄 Continuando investigación - Paso {plan.current_step + 1}/{len(plan.steps)}"
+                )
             else:
                 print("🏁 Investigación completada, procediendo a síntesis")
-        
+
         return should_continue
 
     def __synthesize(self, state: AgentState) -> AgentState:
@@ -298,7 +328,7 @@ class DeepAgent:
         # Preparar un resumen de lo que se ha ejecutado
         plan: Plan = state.get("plan")
         partial_results = state.get("partial_results", {})
-        
+
         synthesis_prompt = f"""
         Consulta original del usuario: {state['user_query']}
         
@@ -317,33 +347,45 @@ class DeepAgent:
         
         Genera una respuesta final coherente para el usuario.
         """
-        
+
         messages = state["messages"] + [HumanMessage(content=synthesis_prompt)]
         final_response = self.model.invoke(messages)
-        
+
         # Actualizar el estado con la respuesta final
         state["final_output"] = final_response
         state["messages"] = messages + [final_response]
         state["status"] = Status.DONE
-        
+
         if self.verbose:
             print("✅ Síntesis completada")
-        
+
         return state
-    
 
     async def invoke(self, query: str) -> AsyncGenerator[str, None]:
         """
         Formula una pregunta al agente y devuelve la última respuesta.
         Args:
-            question: texto de la consulta del usuario.
+            query: texto de la consulta del usuario.
         Returns:
             Generador asíncrono que produce fragmentos de la respuesta final del agente.
         """
-        # Guarda la consulta del usuario como un mensaje humano
-        self.human_query = HumanMessage(content=query)
+        # Preparar el estado inicial
+        initial_messages = []
+        if self.system:
+            initial_messages.append(self.system)
+        initial_messages.append(HumanMessage(content=query))
+        
+        initial_state = {
+            "messages": initial_messages,
+            "human_query": query,
+            "status": Status.OK
+        }
+        
         # Ejecuta el grafo de modo asíncrono y obtiene los eventos
-        events = self.graph.astream_events(input={"messages": [self.human_query]}, config=self.config)
+        events = self.graph.astream_events(
+            input=initial_state,
+            config=self.config,
+        )
         async for event in events:
             # Obtiene el tipo de evento
             kind = event["event"]
@@ -351,7 +393,6 @@ class DeepAgent:
             if kind == "on_chat_model_stream":
                 # Extrae el contenido del evento (fragmento) y lo "yieldea" (es como un "return" dentro de un async)
                 yield event["data"]["chunk"].content
-
 
     def print_graph(self) -> None:
         """Imprime una representación del grafo del agente."""

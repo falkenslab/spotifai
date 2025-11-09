@@ -45,7 +45,7 @@ def chat(agent: DeepAgent, agent_name: str = "DeepAgent", human_name: str = "Tú
         intro: Mensaje de introducción al iniciar el chat.
     """
     try:
-        print(__agent_prompt(agent_name), intro)
+        print(__agent_prompt(agent_name), intro, "\n")
 
         while True:
             human_input = input(__user_prompt(human_name) + " ")

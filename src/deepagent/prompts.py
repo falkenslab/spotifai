@@ -14,9 +14,6 @@ def read_resource_file(package: str, filename: str) -> str:
 
 PLAN_PROMPT_TEMPLATE = PromptTemplate(
     template=read_resource_file("deepagent", "PLAN.md"),
-    input_variables=[
-        "task"
-    ]
 )
 
 SYSTEM_PROMPT_TEMPLATE = PromptTemplate(
