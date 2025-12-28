@@ -27,7 +27,7 @@ dependencies = [
     "python-dotenv",        # Carga de variables desde .env
     "spotipy",              # Spotify Web API
     "fastapi",              # Servidor web para callback OAuth
-    "uvicorn",              # ASGI server para FastAPI
+    "uvicorn",              # ASGI server para FastAPI    
 ]
 requires-python = ">=3.12"
 

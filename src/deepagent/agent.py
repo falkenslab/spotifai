@@ -1,17 +1,21 @@
-import sys
-import json
 from typing import AsyncGenerator
 
 from langchain.chat_models.base import BaseChatModel
+from langchain.tools import tool
 from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage, AIMessage
+from langchain_core.runnables import RunnableConfig
+from langchain_core.callbacks.manager import dispatch_custom_event
 from langgraph.graph import StateGraph, END
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.checkpoint.memory import InMemorySaver
-from langchain.tools import tool
+from langgraph.prebuilt import ToolNode
 
+from deepagent.state import AgentState
+from deepagent.chunk import Chunk, ChunkType
+from deepagent.prompts import PromptFactory
 from deepagent.plan import Plan
-from deepagent.prompts import PLAN_PROMPT_TEMPLATE
-from deepagent.state import AgentState, Status
+from deepagent.research import ResearchResult
+from deepagent.tools import generate_tools_description
 
 
 class DeepAgent:
@@ -25,40 +29,67 @@ class DeepAgent:
     - "summarizer": resume los resultados de la investigación y genera una respuesta final.
     - "executor": ejecuta herramientas solicitadas por el modelo y retorna sus resultados.
 
-    Atributos:
-        system: texto del mensaje de sistema que se añadirá una vez al principio.
-        graph: grafo compilado de LangGraph que gestiona el flujo de mensajes.
-        tools: diccionario de herramientas disponibles indexadas por nombre.
-        model: modelo LLM con herramientas enlazadas mediante ``bind_tools``.
+    Args:
+        model: instancia del modelo conversacional (por ejemplo, ``ChatOpenAI``).
+        domain: descripción del dominio de conocimiento del agente.
+        tone: tono de comunicación del agente.
+        tools: lista de herramientas compatibles con LangChain a exponer al modelo.
         verbose: si es True, imprime mensajes de depuración y resultados de herramientas.
     """
 
-    def __init__(self, model: BaseChatModel, tools: list[tool], system: str = "", verbose: bool = False):
+
+    def __init__(
+        self,
+        model: BaseChatModel,
+        domain: str,
+        tone: str,
+        tools: list[tool],
+        verbose: bool = False,
+    ):
         """
         Inicializa el agente con un modelo, herramientas y un prompt de sistema.
         Args:
             model: instancia del modelo conversacional (por ejemplo, ``ChatOpenAI``).
+            domain: descripción del dominio de conocimiento del agente.
+            tone: tono de comunicación del agente.
             tools: lista de herramientas compatibles con LangChain a exponer al modelo.
-            system: mensaje de sistema opcional que se antepone solo una vez.
             verbose: si es True, imprime mensajes de depuración y resultados de herramientas.
         """
-        self.system = SystemMessage(content=system) if system else None
+
+        self.tools = tools
+        self.domain = domain
+        self.tone = tone
+
+        # Descripción de las herramientas disponibles
+        self.tools_description = generate_tools_description(self.tools)
+
+        # Indica si el agente debe operar en modo verbose
         self.verbose = verbose
-        self.config = {
-            "recursion_limit": 50,  # Límite de recursión para evitar bucles infinitos en el grafo (para que no esté infinitamente dando vueltas)
+
+        # Configuración del grafo
+        self.config : RunnableConfig = {
+            "recursionLimit": 50,      # Límite de recursión para evitar bucles infinitos en el grafo (para que no esté infinitamente dando vueltas)
             "configurable": {
-                "thread_id": "1"    # Identificador del hilo de conversación (en este caso, 1 agente sólo puede mantener una conversación a la vez)
-            },  
+                "thread_id": "1"        # Identificador del hilo de conversación (en este caso, 1 agente sólo puede mantener una conversación a la vez)
+            },
         }
 
         # Construcción del grafo de estados del agente
         self.graph = self.__build_graph()
 
-        # Mapeo de herramientas por nombre
-        self.tools = {t.name: t for t in tools}
-
         # Asociar las herramientas al modelo
-        self.model = model.bind_tools(tools)
+        self.model = model
+
+        # Construir el prompt de sistema
+        self.system_prompt = SystemMessage(content=PromptFactory.render(
+            "system",
+            {
+                "domain": self.domain,
+                "tools": self.tools_description,
+                "tone": self.tone,
+            },
+        ))
+
 
     def __build_graph(self) -> CompiledStateGraph:
         """
@@ -70,8 +101,10 @@ class DeepAgent:
         graph = StateGraph(AgentState)
 
         # Definición de nodos del grafo
-        graph.add_node("planner", self.__plan)  # Nodo de planificación
-        graph.add_node("researcher", self.__research)  # Nodo de investigación
+        graph.add_node("planner", self.__plan)          # Nodo de planificación
+        graph.add_node("researcher", self.__research)   # Nodo de investigación
+        graph.add_node("tools", ToolNode(self.tools))   # Nodo de ejecución de herramientas
+
         # graph.add_node("action", self.__take_action)              # Nodo de ejecución de herramientas (acciones)
 
         # Definición de aristas del grafo
@@ -90,92 +123,45 @@ class DeepAgent:
         # Compilación del grafo para su ejecución con checkpointer en memoria (guarda el estado en memoria)
         return graph.compile(checkpointer=InMemorySaver())
 
-    def __call_tool(self, tool_call) -> ToolMessage:
-        """
-        Ejecuta una herramienta solicitada por el modelo y retorna su resultado.
-        Args:
-            tool_call: Un diccionario con la información de la llamada a la herramienta.
-        Returns:
-            Un mensaje de tipo ToolMessage con el resultado de la ejecución.
-        """
-        # Si está en modo verbose, imprimir la acción que se va a ejecutar
-        if self.verbose:
-            print(f"\nEjecutando acción: {tool_call}\n")
-        # Comprobar si la herramienta existe
-        if not tool_call["name"] in self.tools:
-            # Si está en modo verbose, imprimir mensaje de error
-            if self.verbose:
-                print("\n ....nombre de tool no válida....", file=sys.stderr)
-            result = "nombre de tool no válida, reintentar"  # instruir al LLM a reintentar si el nombre es incorrecto
-        else:
-            # Ejecutar la herramienta y obtener el resultado
-            result = self.tools[tool_call["name"]].invoke(tool_call["args"])
-        # Devuelve un mensaje de tipo ToolMessage con el resultado de ejecutar la herramienta
-        return ToolMessage(
-            tool_call_id=tool_call["id"], name=tool_call["name"], content=str(result)
-        )
 
-    def __plan(self, state: AgentState) -> AgentState:
+    def __plan(self, state: AgentState, config: RunnableConfig) -> AgentState:
         """
         Genera un plan de acción basado en la consulta del usuario.
         Args:
             state: estado actual con la consulta del usuario.
+            config: configuración del runnable con callbacks.
         Returns:
             Un estado actualizado con el plan de acción.
         """
-        plan_prompt = SystemMessage(content=f"""
-Quiero que actúes como un planificador.
 
-# Objetivo
-Generar un plan paso a paso para conseguir ese objetivo en formato JSON.
+        # Emitir evento de inicio de planificación
+        dispatch_custom_event("planning_started", {"status": "planning_started"}, config=config)
 
-# Instrucciones
-1) Crea un plan numerado, claro y ordenado.
-2) Cada paso debe ser concreto, accionable y comprensible.
-3) Si faltan datos, pide aclaraciones antes de seguir.
-4) Si hay varias formas de hacerlo, elige la más sencilla y eficiente.
-
-# Formato de respuesta
-Responde ÚNICAMENTE con un JSON válido con esta estructura:
-
-```json
-["paso 1", "paso 2", "paso 3"]
-```
-
-# Requerimientos adicionales
-NO uses markdown, NO expliques nada, SOLO el JSON.
-""")
+        # Construir el mensaje de sistema para la planificación
+        plan_prompt = SystemMessage(content=PromptFactory.render("plan", {"domain": self.domain}))
 
         # Invocar el modelo para obtener el plan
-        messages = state["messages"] + [plan_prompt]
-        message = self.model.invoke(messages)
+        structured_model : BaseChatModel[Plan] = self.model.with_structured_output(Plan)
+        plan : Plan = structured_model.invoke([
+            self.system_prompt,
+            plan_prompt, 
+            self.human_query
+        ], config=config)
 
-        try:
-            # Intentar parsear el JSON directamente
-            plan = Plan(
-                steps=json.loads(message.content.strip()),
-                current_step=0
-            )
-        except (json.JSONDecodeError, Exception) as e:
-            if self.verbose:
-                print(f"⚠️ Error al parsear plan: {e}")
-                print(f"Contenido recibido: {message.content}")
-            # Plan por defecto en caso de error
-            plan = Plan(
-                steps=[
-                    "Analizar la consulta del usuario",
-                    "Ejecutar acciones necesarias",
-                    "Proporcionar respuesta",
-                ],
-                current_step=0,
-            )
+        # Emitir evento de planificación completada
+        dispatch_custom_event("planning_completed", {
+            "status": "planning_completed",
+            "steps": plan.steps,
+            "steps_count": len(plan.steps)
+        }, config=config)
+
         return {
+            **state, 
             "plan": plan,
-            "messages": messages,
-            "status": Status.OK
+            "messages": state.get("messages", []) + [AIMessage(content=f"He generado un plan de acción con {len(plan.steps)} pasos: {plan}")]  
         }
 
-    def __research(self, state: AgentState) -> AgentState:
+    def __research(self, state: AgentState, config: RunnableConfig) -> AgentState:
         """
         Realiza una investigación basada en el plan de acción.
         Args:
@@ -184,23 +170,40 @@ NO uses markdown, NO expliques nada, SOLO el JSON.
             Un estado actualizado con los resultados de la investigación.
         """
         plan: Plan = state["plan"]
-        
-        if plan.current_step < len(plan.steps):
-            step = plan.steps[plan.current_step]
-            
-            if self.verbose:
-                print(f"🔍 Investigando paso {plan.current_step + 1}/{len(plan.steps)}: {step}")
-            
-            # Por ahora, simplemente avanzamos al siguiente paso
-            plan.current_step += 1
-            
-            # Actualizar el plan en el estado
-            state["plan"] = plan
-        
-        return {
-            "plan": state["plan"],
-            "status": Status.OK
-        }
+        step : str = plan.next_step()
+        if step:
+
+            # Emitir evento de planificación completada
+            dispatch_custom_event("research_started", {
+                "status": "research_started",
+                "step": step,
+            }, config=config)
+
+            reasearch_prompt = SystemMessage(content=PromptFactory.render(
+                "research", 
+                {
+                    "domain": self.domain
+                }
+            ))
+
+            messages = [
+                self.system_prompt,
+                reasearch_prompt,
+                HumanMessage(content=f"Paso del plan a analizar: {step}."),
+            ]
+
+            structured_model : BaseChatModel[ResearchResult] = self.model.with_structured_output(ResearchResult)
+            intent = structured_model.invoke(messages, config=config)
+
+            # Emitir evento de planificación completada
+            dispatch_custom_event("research_completed", {
+                "status": "research_completed",
+                "step": step,
+                "intent": intent.dict(),
+            }, config=config)
+
+        return {"plan": plan}
+
 
     def __summarize(self, state: AgentState) -> AgentState:
         """
@@ -213,83 +216,97 @@ NO uses markdown, NO expliques nada, SOLO el JSON.
         if self.verbose:
             print("🧩 Resumiendo resultados finales...")
 
-        # Preparar un resumen de lo que se ha ejecutado
-        plan: Plan = state.get("plan")
-        partial_results = state.get("partial_results", {})
+        # TODO implementar el resumen final
 
-        summary_prompt = f"""
-        Consulta original del usuario: {state['user_query']}
+        sys = SystemMessage(
+            content=self.system_prompt
+            + "\nResume en 5-8 líneas lo importante para seguir ejecutando. Devuelve texto."
+        )
+        out: AIMessage = self.model.invoke([sys] + state.get("messages", []))
 
-        Plan ejecutado:
-        {chr(10).join([f"{i+1}. {step}" for i, step in enumerate(plan.steps)])}
+        # estrategia simple: guardamos el resumen como un SystemMessage y recortamos
+        summary = out.content
+        new_messages = [SystemMessage(content=f"RESUMEN CONTEXTO:\n{summary}")]
+        return {**state, "messages": new_messages, "scratch": state.get("scratch", {})}
 
-        Resultados obtenidos:
-        {chr(10).join([f"- Paso {k}: {v.get('step_description', 'Sin descripción')}" for k, v in partial_results.items()])}
-
-        Instrucciones:
-        1. Proporciona una respuesta clara y útil basada en los resultados obtenidos
-        2. Incluye detalles específicos de las acciones realizadas
-        3. Si se crearon playlists, menciona sus IDs y URLs
-        4. Si se encontraron canciones, incluye los detalles relevantes
-        5. Sé conciso pero informativo
-
-        Genera una respuesta final coherente para el usuario.
-        """
-
-        messages = state.messages + [HumanMessage(content=summary_prompt)]
-        final_response = self.model.invoke(messages)
-
-        # Actualizar el estado con la respuesta final
-        state.final_output = final_response
-        state.messages = messages + [final_response]
-        state.status = Status.DONE
 
         if self.verbose:
             print("✅ Resumen completado")
 
         return state
 
-    def __exists_action(self, state: AgentState) -> bool:
-        """Indica si el último mensaje contiene llamadas a herramientas.
+    def __route(self, state: AgentState) -> AgentState:
+        """
+        Decide la siguiente acción del agente: continuar investigando o sintetizar resultados.
+        Args:
+            state: estado actual del agente.
+        Returns:
+            Un estado actualizado después de decidir la siguiente acción.
+        """
+        plan: Plan = state.get("plan")
+        if not plan:
+            return state
+
+        if plan.current_step < len(plan.steps):
+            if self.verbose:
+                print(
+                    f"🔄 Continuando investigación - Paso {plan.current_step + 1}/{len(plan.steps)}"
+                )
+            return self.__research(state)
+        else:
+            if self.verbose:
+                print("🏁 Investigación completada, procediendo a síntesis")
+            return self.__finalize(state)
+        
+
+    def __finalize(self, state: AgentState) -> AgentState:
+        """
+        Sintetiza los resultados de la investigación en una respuesta final.
+        Args:
+            state: estado actual con todos los resultados de la investigación.
+        Returns:
+            Un estado actualizado con la respuesta final.
+        """
+        if self.verbose:
+            print("🧩 Sintetizando resultados finales...")
+
+        # TODO implementar la síntesis final
+
+        if self.verbose:
+            print("✅ Síntesis completada")
+
+        return state
+
+
+    # ------------------------------------------
+    # Nodos condicionales
+    # ------------------------------------------
+
+    def __need_summarize(self, state: AgentState) -> bool:
+        """
+        Determina si el agente debe proceder a la síntesis de resultados.
+        Args:
+            state: estado actual del agente.
+        Returns:
+            True si no hay más pasos por ejecutar y se debe sintetizar, False en caso contrario.
+        """
+        return len(state.get("messages", [])) > 30
+
+    def __need_tools(self, state: AgentState) -> bool:
+        """
+        Comprueba si el modelo ha solicitado la ejecución de herramientas.
         Args:
             state: estado actual con el historial de mensajes.
         Returns:
             ``True`` si el último mensaje del modelo incluye ``tool_calls``; en caso contrario ``False``.
         """
-        result = state["messages"][-1]  # Último mensaje generado por el modelo
-        return (
-            len(result.tool_calls) > 0
-        )  # Devuelve True si hay llamadas a herramientas en el último mensaje
+        # Último mensaje generado por el modelo
+        last = state.get("messages", [])[-1]
+        # Devuelve True si hay llamadas a herramientas en el último mensaje
+        return isinstance(last, AIMessage) and getattr(last, "tool_calls", None)
+    
 
-    def __call_model(self, state: AgentState) -> AgentState:
-        """
-        Invoca el modelo LLM con el historial de mensajes.
-        Inserta el mensaje de sistema una única vez si está configurado.
-        Args:
-            state: estado actual con los mensajes acumulados.
-        Returns:
-            Un nuevo estado con el mensaje de salida del modelo en ``messages``.
-        """
-        messages = state["messages"]
-        message = self.model.invoke(messages)
-        return {"messages": [message]}
-
-    def __take_action(self, state: AgentState) -> AgentState:
-        """
-        Ejecuta las herramientas solicitadas por el modelo y retorna sus resultados.
-        Args:
-            state: estado actual cuyo último mensaje contiene ``tool_calls``.
-        Returns:
-            Un estado con los mensajes de tipo ``ToolMessage`` correspondientes a cada ejecución.
-        """
-        tool_calls = state["messages"][-1].tool_calls
-        results = []
-        for t in tool_calls:
-            message = self.__call_tool(t)
-            results.append(message)
-        return {"messages": results}
-
-    def __should_continue_research(self, state: AgentState) -> bool:
+    def __need_more_steps(self, state: AgentState) -> bool:
         """
         Determina si debe continuar con la investigación o proceder a la síntesis.
         Args:
@@ -314,54 +331,11 @@ NO uses markdown, NO expliques nada, SOLO el JSON.
 
         return should_continue
 
-    def __synthesize(self, state: AgentState) -> AgentState:
-        """
-        Sintetiza los resultados de la investigación en una respuesta final.
-        Args:
-            state: estado actual con todos los resultados de la investigación.
-        Returns:
-            Un estado actualizado con la respuesta final.
-        """
-        if self.verbose:
-            print("🧩 Sintetizando resultados finales...")
+    # ------------------------------------------
+    # Ejecución del agente
+    # ------------------------------------------
 
-        # Preparar un resumen de lo que se ha ejecutado
-        plan: Plan = state.get("plan")
-        partial_results = state.get("partial_results", {})
-
-        synthesis_prompt = f"""
-        Consulta original del usuario: {state['user_query']}
-        
-        Plan ejecutado:
-        {chr(10).join([f"{i+1}. {step}" for i, step in enumerate(plan.steps)])}
-        
-        Resultados obtenidos:
-        {chr(10).join([f"- Paso {k}: {v.get('step_description', 'Sin descripción')}" for k, v in partial_results.items()])}
-        
-        Instrucciones:
-        1. Proporciona una respuesta clara y útil basada en los resultados obtenidos
-        2. Incluye detalles específicos de las acciones realizadas
-        3. Si se crearon playlists, menciona sus IDs y URLs
-        4. Si se encontraron canciones, incluye los detalles relevantes
-        5. Sé conciso pero informativo
-        
-        Genera una respuesta final coherente para el usuario.
-        """
-
-        messages = state["messages"] + [HumanMessage(content=synthesis_prompt)]
-        final_response = self.model.invoke(messages)
-
-        # Actualizar el estado con la respuesta final
-        state["final_output"] = final_response
-        state["messages"] = messages + [final_response]
-        state["status"] = Status.DONE
-
-        if self.verbose:
-            print("✅ Síntesis completada")
-
-        return state
-
-    async def invoke(self, query: str) -> AsyncGenerator[str, None]:
+    async def invoke(self, query: str) -> AsyncGenerator[Chunk, None]:
         """
         Formula una pregunta al agente y devuelve la última respuesta.
         Args:
@@ -369,30 +343,70 @@ NO uses markdown, NO expliques nada, SOLO el JSON.
         Returns:
             Generador asíncrono que produce fragmentos de la respuesta final del agente.
         """
-        # Preparar el estado inicial
-        initial_messages = []
-        if self.system:
-            initial_messages.append(self.system)
-        initial_messages.append(HumanMessage(content=query))
-        
+        self.human_query = HumanMessage(content=query)
+
         initial_state = {
-            "messages": initial_messages,
-            "human_query": query,
-            "status": Status.OK
+            "messages": [ 
+                self.system_prompt,
+                self.human_query
+            ]
         }
-        
+
         # Ejecuta el grafo de modo asíncrono y obtiene los eventos
         events = self.graph.astream_events(
             input=initial_state,
             config=self.config,
         )
+
         async for event in events:
             # Obtiene el tipo de evento
             kind = event["event"]
-            # Si el evento es un fragmento de respuesta del modelo, lo "yieldea"
-            if kind == "on_chat_model_stream":
-                # Extrae el contenido del evento (fragmento) y lo "yieldea" (es como un "return" dentro de un async)
-                yield event["data"]["chunk"].content
+            chunk : Chunk = None    # Fragmento de respuesta que emite el agente
+            match kind:
+
+                # Solo mostrar eventos del modelo del nodo researcher
+                case "on_chat_model_stream":
+                    # Filtrar por el nodo que queremos mostrar
+                    lg_node = event['metadata'].get('langgraph_node', "")
+                    content = event["data"]["chunk"].content
+                    match lg_node:
+                        case "researcher" | "planner":
+                            chunk = Chunk(type=ChunkType.THINKING, content=content)
+                        case "finalizer":
+                            chunk = Chunk(type=ChunkType.TEXT, content=content)
+
+                # Manejar eventos personalizados de planificación
+                case "on_custom_event":
+                    event_name = event.get("name", "")
+                    data = event.get("data", {})
+                    
+                    match event_name:
+                        case "planning_started":
+                            chunk = Chunk(type=ChunkType.THINKING, content="🧠 Generando plan de acción...\n")
+                        case "planning_completed":
+                            steps_count = data.get("steps_count", 0)
+                            chunk = Chunk(type=ChunkType.THINKING, content=f"\n✅ Plan generado con {steps_count} pasos\n")
+                        case "research_started":
+                            step = data.get("step", "")
+                            chunk = Chunk(type=ChunkType.THINKING, content=f"\n🔎 Investigando paso: {step}\n")
+                        case "research_completed":
+                            intent = data.get("intent", {})
+                            chunk = Chunk(type=ChunkType.THINKING, content=f"\n✅ Investigación completada. Intent: {intent}\n")
+                        case _:
+                            # Otros eventos personalizados
+                            if self.verbose:
+                                chunk = Chunk(type=ChunkType.THINKING, content=f"[{event_name}]: {data}\n")
+
+                case _:                    
+                    #print(f"🔔 Evento no manejado: {kind} en nodo {node_name}")
+                    pass
+
+            if chunk:
+                yield chunk
+
+    # ------------------------------------------
+    # Utilidades de depuración
+    # ------------------------------------------
 
     def print_graph(self) -> None:
         """Imprime una representación del grafo del agente."""
