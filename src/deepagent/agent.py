@@ -21,14 +21,6 @@ from deepagent.tools import generate_tools_description
 class DeepAgent:
     """
     Agente profundo que razona y actúa según un plan definido para llevar a cabo la petición del usuario.
-
-    Construye un grafo de estados con los siguientes nodos:
-    - "init": inicializa el estado del agente con el mensaje de sistema.
-    - "planner": invoca el modelo para generar un plan de acción.
-    - "researcher": realiza investigaciones basadas en el plan.
-    - "summarizer": resume los resultados de la investigación y genera una respuesta final.
-    - "executor": ejecuta herramientas solicitadas por el modelo y retorna sus resultados.
-
     Args:
         model: instancia del modelo conversacional (por ejemplo, ``ChatOpenAI``).
         domain: descripción del dominio de conocimiento del agente.
@@ -36,7 +28,6 @@ class DeepAgent:
         tools: lista de herramientas compatibles con LangChain a exponer al modelo.
         verbose: si es True, imprime mensajes de depuración y resultados de herramientas.
     """
-
 
     def __init__(
         self,
@@ -100,42 +91,52 @@ class DeepAgent:
         # Construcción del grafo de estados del agente
         graph = StateGraph(AgentState)
 
-        # Definición de nodos del grafo
-        graph.add_node("planner", self.__plan)          # Nodo de planificación
-        graph.add_node("researcher", self.__research)   # Nodo de investigación
-        graph.add_node("tools", ToolNode(self.tools))   # Nodo de ejecución de herramientas
-
-        # graph.add_node("action", self.__take_action)              # Nodo de ejecución de herramientas (acciones)
-
-        # Definición de aristas del grafo
-        graph.add_edge("planner", "researcher")  # Desde el modelo, ir a investigar
-        graph.add_edge("researcher", END)  # Si el modelo no pide herramientas, terminar
-        ##graph.add_conditional_edges(
-        ##    "llm",                                              # La arista condicional sale del nodo "llm"
-        ##    self.__exists_action,                                 # Función que decide si se debe ir al nodo de acción o terminar
-        ##    {True: "action", False: END},
-        ##)                                                       # Si el modelo decide llamar a una herramienta, ir al nodo de acción; si no, terminar
-        ##graph.add_edge("action", "llm")                         # Después de ejecutar una acción, volver al modelo
-
         # Definición del punto de entrada del grafo
         graph.set_entry_point("planner")
+
+        # Definición de nodos del grafo
+        graph.add_node("planner", self.__plan)          # Nodo de planificación: genera el plan de acción
+        graph.add_node("researcher", self.__research)   # Nodo de investigación: investiga cada paso del plan
+        graph.add_node("summarizer", self.__summarize)  # Nodo de resumen: resume la conversación hasta ahora (si es necesario)
+        graph.add_node("executor", self.__executor)     # Nodo de ejecución: determina qué herramientas hay que ejecutar
+        graph.add_node("tools", ToolNode(self.tools))   # Nodo de herramientas: ejecuta herramientas solicitadas por el agente
+        graph.add_node("critic", self.__critic)         # Nodo de juicio: decide si continuar o finalizar
+        graph.add_node("finalizer", self.__finalize)    # Nodo de síntesis final: genera la respuesta final
+
+        # Definición de aristas del grafo
+        graph.add_edge("planner", "researcher")         # Desde el modelo, ir a investigar
+        graph.add_conditional_edges(
+            "researcher",                               # La arista condicional sale del nodo "researcher"
+            self.__need_summarize,                      # Función que decide si se debe ir al nodo de resumen o continuar
+            {True: "summarizer", False: "executor"}     # Si se debe resumir, ir al nodo de resumen; si no, al nodo de enrutamiento
+        )
+        graph.add_edge("summarizer", "executor")        # Si el modelo no pide herramientas, terminar
+        graph.add_conditional_edges(
+            "executor",                                 # La arista condicional sale del nodo "executor"
+            self.__need_tools,                          # Función que decide si se deben ejecutar herramientas o resumir
+            {True: "tools", False: "critic"}            # Si el modelo pide herramientas, ir al nodo de herramientas; si no, al nodo de juicio
+        )
+        graph.add_edge("tools", "executor")             # Desde las herramientas, ir al nodo de ejecución
+        graph.add_conditional_edges(
+            "critic",                                   # La arista condicional sale del nodo "critic"
+            self.__need_more_steps,                     # Función que decide si se deben investigar más pasos
+            {True: "researcher", False: "finalizer"}    # Si hay más pasos, ir al nodo de investigación; si no, al nodo de síntesis final
+        )
+        graph.add_edge("finalizer", END)                # Desde la síntesis final, terminar
 
         # Compilación del grafo para su ejecución con checkpointer en memoria (guarda el estado en memoria)
         return graph.compile(checkpointer=InMemorySaver())
 
 
+    # -----------------------------------------------------------
+    # Nodo de planificación
+    # -----------------------------------------------------------
+
     def __plan(self, state: AgentState, config: RunnableConfig) -> AgentState:
-        """
-        Genera un plan de acción basado en la consulta del usuario.
-        Args:
-            state: estado actual con la consulta del usuario.
-            config: configuración del runnable con callbacks.
-        Returns:
-            Un estado actualizado con el plan de acción.
-        """
+        """Genera un plan de acción basado en la consulta del usuario"""
 
         # Emitir evento de inicio de planificación
-        dispatch_custom_event("planning_started", {"status": "planning_started"}, config=config)
+        dispatch_custom_event("planning_started", {}, config=config)
 
         # Construir el mensaje de sistema para la planificación
         plan_prompt = SystemMessage(content=PromptFactory.render("plan", {"domain": self.domain}))
@@ -150,137 +151,126 @@ class DeepAgent:
 
         # Emitir evento de planificación completada
         dispatch_custom_event("planning_completed", {
-            "status": "planning_completed",
-            "steps": plan.steps,
-            "steps_count": len(plan.steps)
+            "plan": plan,
         }, config=config)
 
         return {
-            **state, 
             "plan": plan,
             "messages": state.get("messages", []) + [AIMessage(content=f"He generado un plan de acción con {len(plan.steps)} pasos: {plan}")]  
         }
 
+
+    # -----------------------------------------------------------
+    # Nodo de investigación
+    # -----------------------------------------------------------
+
     def __research(self, state: AgentState, config: RunnableConfig) -> AgentState:
-        """
-        Realiza una investigación basada en el plan de acción.
-        Args:
-            state: estado actual con el plan de acción.
-        Returns:
-            Un estado actualizado con los resultados de la investigación.
-        """
-        plan: Plan = state["plan"]
+        """Realiza una investigación basada en el plan de acción"""
+
+        plan: Plan = state.plan
         step : str = plan.next_step()
+        
+        # Emitir evento de investigación iniciada
+        dispatch_custom_event("research_started", {
+            "step": step if step else "",
+            "step_index": (plan.current_step - 1) if step else 0,
+        }, config=config)
+
         if step:
-
-            # Emitir evento de planificación completada
-            dispatch_custom_event("research_started", {
-                "status": "research_started",
-                "step": step,
-            }, config=config)
-
             reasearch_prompt = SystemMessage(content=PromptFactory.render(
                 "research", 
                 {
                     "domain": self.domain
                 }
             ))
-
             messages = [
                 self.system_prompt,
                 reasearch_prompt,
                 HumanMessage(content=f"Paso del plan a analizar: {step}."),
             ]
-
             structured_model : BaseChatModel[ResearchResult] = self.model.with_structured_output(ResearchResult)
-            intent = structured_model.invoke(messages, config=config)
-
-            # Emitir evento de planificación completada
-            dispatch_custom_event("research_completed", {
-                "status": "research_completed",
-                "step": step,
-                "intent": intent.dict(),
-            }, config=config)
-
-        return {"plan": plan}
-
-
-    def __summarize(self, state: AgentState) -> AgentState:
-        """
-        Resume los resultados de la investigación y genera una respuesta final.
-        Args:
-            state: estado actual con todos los resultados de la investigación.
-        Returns:
-            Un estado actualizado con la respuesta final.
-        """
-        if self.verbose:
-            print("🧩 Resumiendo resultados finales...")
-
-        # TODO implementar el resumen final
-
-        sys = SystemMessage(
-            content=self.system_prompt
-            + "\nResume en 5-8 líneas lo importante para seguir ejecutando. Devuelve texto."
-        )
-        out: AIMessage = self.model.invoke([sys] + state.get("messages", []))
-
-        # estrategia simple: guardamos el resumen como un SystemMessage y recortamos
-        summary = out.content
-        new_messages = [SystemMessage(content=f"RESUMEN CONTEXTO:\n{summary}")]
-        return {**state, "messages": new_messages, "scratch": state.get("scratch", {})}
-
-
-        if self.verbose:
-            print("✅ Resumen completado")
-
-        return state
-
-    def __route(self, state: AgentState) -> AgentState:
-        """
-        Decide la siguiente acción del agente: continuar investigando o sintetizar resultados.
-        Args:
-            state: estado actual del agente.
-        Returns:
-            Un estado actualizado después de decidir la siguiente acción.
-        """
-        plan: Plan = state.get("plan")
-        if not plan:
-            return state
-
-        if plan.current_step < len(plan.steps):
-            if self.verbose:
-                print(
-                    f"🔄 Continuando investigación - Paso {plan.current_step + 1}/{len(plan.steps)}"
-                )
-            return self.__research(state)
+            research_result = structured_model.invoke(messages, config=config)
         else:
-            if self.verbose:
-                print("🏁 Investigación completada, procediendo a síntesis")
-            return self.__finalize(state)
-        
+            research_result = ResearchResult(
+                intent="Ninguno",
+                notes="No hay pasos para investigar."
+            )
 
-    def __finalize(self, state: AgentState) -> AgentState:
-        """
-        Sintetiza los resultados de la investigación en una respuesta final.
-        Args:
-            state: estado actual con todos los resultados de la investigación.
-        Returns:
-            Un estado actualizado con la respuesta final.
-        """
-        if self.verbose:
-            print("🧩 Sintetizando resultados finales...")
+        # Emitir evento de planificación completada
+        dispatch_custom_event("research_completed", {
+            "research_result": research_result,
+        }, config=config)
 
-        # TODO implementar la síntesis final
+        return {
+            "plan": plan, 
+            "scratch": {
+                "research_result": research_result
+            },
+        }
 
-        if self.verbose:
-            print("✅ Síntesis completada")
 
+    # -----------------------------------------------------------
+    # Nodo de resumen
+    # -----------------------------------------------------------
+
+    def __summarize(self, state: AgentState, config: RunnableConfig) -> AgentState:
+        """Resume los resultados de la investigación y genera una respuesta final"""
+
+        dispatch_custom_event("summarizing_started", {
+            "total_messages": len(state.get("messages", []))
+        }, config=config)
+
+        summary_prompt = HumanMessage(content="Resume en 5-8 líneas lo importante para seguir ejecutando. Devuelve texto.")
+        summary: AIMessage = self.model.invoke(state.get("messages", []) + [summary_prompt], config=config)
+        new_messages = [SystemMessage(content=summary.content)]
+
+        dispatch_custom_event("summarizing_completed", {}, config=config)
+
+        return {
+            "messages": new_messages
+        }
+
+
+    # -----------------------------------------------------------
+    # Nodo que determina que herramientas ejecutar
+    # -----------------------------------------------------------
+
+    def __executor(self, state: AgentState, config: RunnableConfig) -> AgentState:
+        """Decide la siguiente acción del agente: continuar investigando o sintetizar resultados."""
+
+        #research_result =
+
+        dispatch_custom_event("execution_started", {}, config=config)
+
+        dispatch_custom_event("execution_completed", {}, config=config)
         return state
 
 
-    # ------------------------------------------
+    # -----------------------------------------------------------
+    # Nodo que determina si el agente termina o continúa
+    # -----------------------------------------------------------
+
+    def __critic(self, state: AgentState, config: RunnableConfig) -> AgentState:
+        """Evalúa el progreso del agente y decide si continuar o finalizar."""
+        dispatch_custom_event("critic_started", {}, config=config)
+        dispatch_custom_event("critic_completed", {}, config=config)
+        return state
+
+
+    # -----------------------------------------------------------
+    # Nodo de síntesis final
+    # -----------------------------------------------------------
+
+    def __finalize(self, state: AgentState, config: RunnableConfig) -> AgentState:
+        """Sintetiza los resultados de la investigación en una respuesta final."""
+        dispatch_custom_event("finalizing_started", {}, config=config)
+        dispatch_custom_event("finalizing_completed", {}, config=config)
+        return state
+
+
+    # -----------------------------------------------------------
     # Nodos condicionales
-    # ------------------------------------------
+    # -----------------------------------------------------------
 
     def __need_summarize(self, state: AgentState) -> bool:
         """
@@ -290,7 +280,10 @@ class DeepAgent:
         Returns:
             True si no hay más pasos por ejecutar y se debe sintetizar, False en caso contrario.
         """
-        return len(state.get("messages", [])) > 30
+        messages = state.get("messages", [])
+        need_summarize = len(messages) > 10
+        print(f"❓Necesita resumir: {need_summarize}")
+        return need_summarize
 
     def __need_tools(self, state: AgentState) -> bool:
         """
@@ -303,7 +296,9 @@ class DeepAgent:
         # Último mensaje generado por el modelo
         last = state.get("messages", [])[-1]
         # Devuelve True si hay llamadas a herramientas en el último mensaje
-        return isinstance(last, AIMessage) and getattr(last, "tool_calls", None)
+        need_tools = isinstance(last, AIMessage) and getattr(last, "tool_calls", None)
+        print(f"❓Necesita llamar a herramientas: {need_tools}")
+        return need_tools
     
 
     def __need_more_steps(self, state: AgentState) -> bool:
@@ -315,25 +310,14 @@ class DeepAgent:
             True si hay más pasos por ejecutar, False en caso contrario.
         """
         plan: Plan = state.get("plan")
-        if not plan:
-            return False
-
         # Continuar si hay más pasos por ejecutar
         should_continue = plan.current_step < len(plan.steps)
-
-        if self.verbose:
-            if should_continue:
-                print(
-                    f"🔄 Continuando investigación - Paso {plan.current_step + 1}/{len(plan.steps)}"
-                )
-            else:
-                print("🏁 Investigación completada, procediendo a síntesis")
-
+        print(f"❓Necesita más pasos: {should_continue}")
         return should_continue
 
-    # ------------------------------------------
+    # -----------------------------------------------------------
     # Ejecución del agente
-    # ------------------------------------------
+    # -----------------------------------------------------------
 
     async def invoke(self, query: str) -> AsyncGenerator[Chunk, None]:
         """
@@ -371,7 +355,8 @@ class DeepAgent:
                     content = event["data"]["chunk"].content
                     match lg_node:
                         case "researcher" | "planner":
-                            chunk = Chunk(type=ChunkType.THINKING, content=content)
+                            pass
+                            #chunk = Chunk(type=ChunkType.THINKING, content=content)
                         case "finalizer":
                             chunk = Chunk(type=ChunkType.TEXT, content=content)
 
@@ -384,18 +369,29 @@ class DeepAgent:
                         case "planning_started":
                             chunk = Chunk(type=ChunkType.THINKING, content="🧠 Generando plan de acción...\n")
                         case "planning_completed":
-                            steps_count = data.get("steps_count", 0)
-                            chunk = Chunk(type=ChunkType.THINKING, content=f"\n✅ Plan generado con {steps_count} pasos\n")
+                            plan : Plan = data["plan"] if "plan" in data else None
+                            output = ""
+                            for idx, step in enumerate(plan.steps):
+                                output += f"* Paso [{idx + 1}]: {step}\n"
+                            output += f"✅ Plan generado con {len(plan.steps)} pasos\n"
+                            chunk = Chunk(type=ChunkType.THINKING, content=output)
                         case "research_started":
                             step = data.get("step", "")
-                            chunk = Chunk(type=ChunkType.THINKING, content=f"\n🔎 Investigando paso: {step}\n")
+                            step_index = data.get("step_index", 0)
+                            chunk = Chunk(type=ChunkType.THINKING, content=f"\n🔎 Investigando paso [{step_index + 1}]: {step}\n")
                         case "research_completed":
-                            intent = data.get("intent", {})
-                            chunk = Chunk(type=ChunkType.THINKING, content=f"\n✅ Investigación completada. Intent: {intent}\n")
+                            research_result : ResearchResult = data.get("research_result", {})
+                            intent = research_result.intent
+                            notes = research_result.notes
+                            output = f"""
+* Objetivo: {intent}
+* Notas   : {notes}
+✅ Investifación del paso [{step_index + 1}] completada
+"""
+                            chunk = Chunk(type=ChunkType.THINKING, content=f"{output.strip()}\n")
                         case _:
                             # Otros eventos personalizados
-                            if self.verbose:
-                                chunk = Chunk(type=ChunkType.THINKING, content=f"[{event_name}]: {data}\n")
+                            chunk = Chunk(type=ChunkType.THINKING, content=f"[{event_name}]: {data}\n")
 
                 case _:                    
                     #print(f"🔔 Evento no manejado: {kind} en nodo {node_name}")
@@ -404,9 +400,9 @@ class DeepAgent:
             if chunk:
                 yield chunk
 
-    # ------------------------------------------
+    # -----------------------------------------------------------
     # Utilidades de depuración
-    # ------------------------------------------
+    # -----------------------------------------------------------
 
     def print_graph(self) -> None:
         """Imprime una representación del grafo del agente."""

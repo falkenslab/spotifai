@@ -16,18 +16,17 @@ Generador de playlists de Spotify con IA. Interactúa en modo chat para buscar c
 
 - Python 3.12 o superior.
 - Cuenta de Spotify.
-- OpenSSL disponible en tu sistema (para generar certificados locales del callback HTTPS).
 - Clave API del proveedor LLM (por ejemplo, OpenAI) si usas modelos en la nube.
 
 ## Instalación
 
-Instala directamente desde GitHub (sin clonar):
+Instala directamente desde GitHub:
 
 ```bash
 pip install "spotifai @ git+https://github.com/falkenslab/spotifai.git@main"
 ```
 
-Alternativa con `uv` (sin clonar):
+Alternativa con `uv`:
 
 ```bash
 uv pip install "spotifai @ git+https://github.com/falkenslab/spotifai.git@main"
@@ -50,11 +49,11 @@ Notas sobre Spotify:
 
 - El proyecto usa OAuth con PKCE y un callback local seguro: `https://127.0.0.1:8888/callback`.
 - En el primer uso se abre el navegador para autorizar la app. Se guarda caché en `~/.spotifai/.cache`.
-- Se generan certificados autofirmados en `~/.spotifai` con `openssl`. Asegúrate de tener OpenSSL disponible en tu sistema.
+- Se generan certificados autofirmados en `~/.spotifai`.
 - El `client_id` está preconfigurado en el código para simplificar el arranque. Si prefieres tu propia app de Spotify:
   - Crea una app en https://developer.spotify.com/dashboard
   - Registra la URI de redirección: `https://127.0.0.1:8888/callback`
-  - Sustituye `SPOTIFY_CLIENT_ID` en `src/spotifai/__init__.py` por tu Client ID.
+  - Sustituye `SPOTIFY_CLIENT_ID` en `src/spotify/__init__.py` por tu Client ID.
 
 ## Uso
 
@@ -119,6 +118,38 @@ uv run pytest -q
 - Pasa formato y tests con `uv run`.
 - Abre un Pull Request explicando el contexto y las decisiones.
 
+## Grafo del agente
+
+```mermaid
 ---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	planner(planner)
+	researcher(researcher)
+	summarizer(summarizer)
+	executor(executor)
+	tools(tools)
+	critic(critic)
+	finalizer(finalizer)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> planner;
+	critic -. &nbsp;False&nbsp; .-> finalizer;
+	critic -. &nbsp;True&nbsp; .-> researcher;
+	executor -. &nbsp;False&nbsp; .-> critic;
+	executor -. &nbsp;True&nbsp; .-> tools;
+	planner --> researcher;
+	researcher -. &nbsp;False&nbsp; .-> executor;
+	researcher -. &nbsp;True&nbsp; .-> summarizer;
+	summarizer --> executor;
+	tools --> executor;
+	finalizer --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc
+```
 
 Made with ❤️ by @falkenslab_team

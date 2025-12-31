@@ -6,6 +6,7 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
 from importlib import resources
+from .utils import make_localhost_cert
 
 from .__init__ import (
     CERT_FILE,
@@ -50,12 +51,12 @@ class CallbackHandler(BaseHTTPRequestHandler):
 
         # Lee la página de respuesta usando importlib.resources
         with (
-            resources.files("spotifai")
-            .joinpath("assets")
-            .joinpath("callback.html")
-            .open("rb") as f
-        ):
-            response_content = f.read()
+            resources
+                .files("spotify")
+                .joinpath("assets")
+                .joinpath("callback.html")
+                .open("rb") as f
+        ): response_content = f.read()
 
         # Responder al navegador
         self.send_response(200)
@@ -93,26 +94,7 @@ class SpotifyCallbackServer(HTTPServer):
         """
         if not (os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE)):
             os.makedirs(CONFIG_DIR, exist_ok=True)
-            subprocess.run(
-                [
-                    "openssl",
-                    "req",
-                    "-x509",
-                    "-newkey",
-                    "rsa:2048",
-                    "-keyout",
-                    KEY_FILE,
-                    "-out",
-                    CERT_FILE,
-                    "-days",
-                    "36500",
-                    "-nodes",
-                    "-subj",
-                    f"/CN={HOST}",
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            make_localhost_cert(CERT_FILE, KEY_FILE, days_valid=36500)
 
     def run(self):
         global auth_code

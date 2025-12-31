@@ -18,16 +18,17 @@ classifiers = [
 ]
 keywords = ["spotify", "llm", "ai", "playlist", "music", "manager"]
 dependencies = [
-    "deepagents",           # Agentes con LLMs
-    "langchain",            # Langchain framework
-    "langchain-openai",     # Soporte de OpenAI en Langchain
-    "langchain-ollama",     # Soporte de Ollama en Langchain
-    "langgraph",            # Herramientas para construir aplicaciones con LLMs
-    "langgraph-prebuilt",   # Componentes preconstruidos para LangGraph
-    "python-dotenv",        # Carga de variables desde .env
-    "spotipy",              # Spotify Web API
-    "fastapi",              # Servidor web para callback OAuth
-    "uvicorn",              # ASGI server para FastAPI    
+    "deepagents", # Agentes con LLMs
+    "langchain", # Langchain framework
+    "langchain-openai", # Soporte de OpenAI en Langchain
+    "langchain-ollama", # Soporte de Ollama en Langchain
+    "langgraph", # Herramientas para construir aplicaciones con LLMs
+    "langgraph-prebuilt", # Componentes preconstruidos para LangGraph
+    "python-dotenv", # Carga de variables desde .env
+    "spotipy", # Spotify Web API
+    "fastapi", # Servidor web para callback OAuth
+    "uvicorn", # ASGI server para FastAPI
+    "cryptography>=46.0.3",
 ]
 requires-python = ">=3.12"
 

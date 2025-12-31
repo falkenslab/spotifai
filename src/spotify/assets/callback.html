@@ -12,9 +12,15 @@
             color: #fff;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, Arial, sans-serif;
             display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+        }
+
+        .content {
+            flex: 1;
+            display: flex;
             justify-content: center;
             align-items: center;
-            height: 100vh;
         }
 
         .card {
@@ -56,14 +62,27 @@
             font-style: italic;
             font-weight: 700;
         }
+
+        .footer {
+            font-size: 0.8rem;
+            color: grey;
+            padding: 20px;
+            text-align: center;
+        }
     </style>
 </head>
 
 <body>
-    <div class="card">
-        <div class="brand">Spotif<span>AI</span></div>
-        <h1>Autenticación completada</h1>
-        <p>Puedes cerrar esta ventana.<br>Tu aplicación ya está conectada con Spotify.</p>
+    <div class="content">
+        <div class="card">
+            <div class="brand">Spotif<span>AI</span></div>
+            <h1>Autenticación completada </h1>
+            <p>Puedes cerrar esta ventana.<br>Tu aplicación ya está conectada con Spotify.</p>
+        </div>
+    </div>
+    <div class="footer">
+        Made with 💖 by 
+        <a href="https://github.com/falkenslab" target="_blank" rel="noopener noreferrer">FalkensLab</a> team
     </div>
 </body>
 
