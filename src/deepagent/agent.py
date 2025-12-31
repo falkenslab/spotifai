@@ -1,8 +1,8 @@
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 
 from langchain.chat_models.base import BaseChatModel
 from langchain.tools import tool
-from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage, AIMessage
+from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage, AIMessage, AnyMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.callbacks.manager import dispatch_custom_event
 from langgraph.graph import StateGraph, END
@@ -14,7 +14,7 @@ from deepagent.state import AgentState
 from deepagent.chunk import Chunk, ChunkType
 from deepagent.prompts import PromptFactory
 from deepagent.plan import Plan
-from deepagent.research import ResearchResult
+from deepagent.research import Intent
 from deepagent.tools import generate_tools_description
 
 
@@ -70,6 +70,7 @@ class DeepAgent:
 
         # Asociar las herramientas al modelo
         self.model = model
+        self.model_with_tools = self.model.bind_tools(self.tools) if self.tools else self.model
 
         # Construir el prompt de sistema
         self.system_prompt = SystemMessage(content=PromptFactory.render(
@@ -167,7 +168,7 @@ class DeepAgent:
     def __research(self, state: AgentState, config: RunnableConfig) -> AgentState:
         """Realiza una investigación basada en el plan de acción"""
 
-        plan: Plan = state.plan
+        plan: Plan = state["plan"]
         step : str = plan.next_step()
         
         # Emitir evento de investigación iniciada
@@ -183,28 +184,27 @@ class DeepAgent:
                     "domain": self.domain
                 }
             ))
-            messages = [
+            structured_model : BaseChatModel[Intent] = self.model.with_structured_output(Intent)
+            intent = structured_model.invoke([
                 self.system_prompt,
                 reasearch_prompt,
                 HumanMessage(content=f"Paso del plan a analizar: {step}."),
-            ]
-            structured_model : BaseChatModel[ResearchResult] = self.model.with_structured_output(ResearchResult)
-            research_result = structured_model.invoke(messages, config=config)
+            ], config=config)
         else:
-            research_result = ResearchResult(
-                intent="Ninguno",
+            intent = Intent(
+                goal="Ninguno",
                 notes="No hay pasos para investigar."
             )
 
         # Emitir evento de planificación completada
         dispatch_custom_event("research_completed", {
-            "research_result": research_result,
+            "intent": intent,
         }, config=config)
 
         return {
             "plan": plan, 
             "scratch": {
-                "research_result": research_result
+                "intent": intent
             },
         }
 
@@ -222,12 +222,18 @@ class DeepAgent:
 
         summary_prompt = HumanMessage(content="Resume en 5-8 líneas lo importante para seguir ejecutando. Devuelve texto.")
         summary: AIMessage = self.model.invoke(state.get("messages", []) + [summary_prompt], config=config)
-        new_messages = [SystemMessage(content=summary.content)]
 
-        dispatch_custom_event("summarizing_completed", {}, config=config)
+        dispatch_custom_event("summarizing_completed", {
+            "summary": summary.content
+        }, config=config)
 
+        # Reemplazar todos los mensajes con el system_prompt, la query original y el resumen
         return {
-            "messages": new_messages
+            "messages": [
+                self.system_prompt,
+                self.human_query,
+                SystemMessage(content=summary.content)
+            ]
         }
 
 
@@ -238,12 +244,38 @@ class DeepAgent:
     def __executor(self, state: AgentState, config: RunnableConfig) -> AgentState:
         """Decide la siguiente acción del agente: continuar investigando o sintetizar resultados."""
 
-        #research_result =
+        step : Optional[str] = state.get("plan").get_current_step()
+        intent : Intent = state.get("scratch", {}).get("intent")
 
-        dispatch_custom_event("execution_started", {}, config=config)
+        dispatch_custom_event("execution_started", {
+            "step": step if step else "",
+            "intent": intent
+        }, config=config)
 
-        dispatch_custom_event("execution_completed", {}, config=config)
-        return state
+        executor_prompt = SystemMessage(content=PromptFactory.render(
+            "executor",
+            {}
+        ))
+        input_message = HumanMessage(content=f"""
+            Objetivo: {self.human_query.content}.
+            Paso actual: {step}
+            Análisis del paso:
+            * Objetivo de la investigación: {intent.goal}
+            * Notas de la investigación: {intent.notes}
+        """)
+        response: AnyMessage = self.model_with_tools.invoke([
+            self.system_prompt,
+            executor_prompt, 
+            input_message
+        ], config=config)
+
+        dispatch_custom_event("execution_completed", {
+            "response": response.content
+        }, config=config)
+
+        return {
+            "messages": state.get("messages", []) + [response]
+        }
 
 
     # -----------------------------------------------------------
@@ -272,7 +304,7 @@ class DeepAgent:
     # Nodos condicionales
     # -----------------------------------------------------------
 
-    def __need_summarize(self, state: AgentState) -> bool:
+    def __need_summarize(self, state: AgentState, config: RunnableConfig) -> bool:
         """
         Determina si el agente debe proceder a la síntesis de resultados.
         Args:
@@ -282,10 +314,11 @@ class DeepAgent:
         """
         messages = state.get("messages", [])
         need_summarize = len(messages) > 10
-        print(f"❓Necesita resumir: {need_summarize}")
+        dispatch_custom_event("need_summarize", {"need_summarize": need_summarize}, config=config)
         return need_summarize
 
-    def __need_tools(self, state: AgentState) -> bool:
+
+    def __need_tools(self, state: AgentState, config: RunnableConfig) -> bool:
         """
         Comprueba si el modelo ha solicitado la ejecución de herramientas.
         Args:
@@ -296,12 +329,12 @@ class DeepAgent:
         # Último mensaje generado por el modelo
         last = state.get("messages", [])[-1]
         # Devuelve True si hay llamadas a herramientas en el último mensaje
-        need_tools = isinstance(last, AIMessage) and getattr(last, "tool_calls", None)
-        print(f"❓Necesita llamar a herramientas: {need_tools}")
+        need_tools = isinstance(last, AIMessage) and hasattr(last, "tool_calls") and len(last.tool_calls) > 0
+        dispatch_custom_event("need_tools", {"need_tools": need_tools}, config=config)
         return need_tools
     
 
-    def __need_more_steps(self, state: AgentState) -> bool:
+    def __need_more_steps(self, state: AgentState, config: RunnableConfig) -> bool:
         """
         Determina si debe continuar con la investigación o proceder a la síntesis.
         Args:
@@ -312,7 +345,7 @@ class DeepAgent:
         plan: Plan = state.get("plan")
         # Continuar si hay más pasos por ejecutar
         should_continue = plan.current_step < len(plan.steps)
-        print(f"❓Necesita más pasos: {should_continue}")
+        dispatch_custom_event("need_more_steps", {"should_continue": should_continue}, config=config)
         return should_continue
 
     # -----------------------------------------------------------
@@ -352,13 +385,13 @@ class DeepAgent:
                 case "on_chat_model_stream":
                     # Filtrar por el nodo que queremos mostrar
                     lg_node = event['metadata'].get('langgraph_node', "")
-                    content = event["data"]["chunk"].content
+                    intent = event["data"]["chunk"].content
                     match lg_node:
                         case "researcher" | "planner":
                             pass
                             #chunk = Chunk(type=ChunkType.THINKING, content=content)
                         case "finalizer":
-                            chunk = Chunk(type=ChunkType.TEXT, content=content)
+                            chunk = Chunk(type=ChunkType.TEXT, content=intent)
 
                 # Manejar eventos personalizados de planificación
                 case "on_custom_event":
@@ -366,6 +399,15 @@ class DeepAgent:
                     data = event.get("data", {})
                     
                     match event_name:
+                        case "need_summarize":
+                            need_summarize = data.get("need_summarize", False)
+                            chunk = Chunk(type=ChunkType.THINKING, content=f"\n❓ Necesito resumir la conversación para continuar: {need_summarize}\n")
+                        case "need_tools":
+                            need_tools = data.get("need_tools", False)
+                            chunk = Chunk(type=ChunkType.THINKING, content=f"\n❓ Necesito llamar a herramientas para continuar: {need_tools}\n")
+                        case "need_more_steps":
+                            should_continue = data.get("should_continue", False)
+                            chunk = Chunk(type=ChunkType.THINKING, content=f"\n❓ Quedan más pasos por investigar: {should_continue}\n")
                         case "planning_started":
                             chunk = Chunk(type=ChunkType.THINKING, content="🧠 Generando plan de acción...\n")
                         case "planning_completed":
@@ -380,18 +422,36 @@ class DeepAgent:
                             step_index = data.get("step_index", 0)
                             chunk = Chunk(type=ChunkType.THINKING, content=f"\n🔎 Investigando paso [{step_index + 1}]: {step}\n")
                         case "research_completed":
-                            research_result : ResearchResult = data.get("research_result", {})
-                            intent = research_result.intent
-                            notes = research_result.notes
-                            output = f"""
-* Objetivo: {intent}
-* Notas   : {notes}
-✅ Investifación del paso [{step_index + 1}] completada
-"""
-                            chunk = Chunk(type=ChunkType.THINKING, content=f"{output.strip()}\n")
+                            intent : Intent = data.get("intent", {})
+                            output = (
+                                f"* Objetivo: {intent.goal}\n"
+                                f"* Notas   : {intent.notes}\n"
+                                f"✅ Investifación del paso [{step_index + 1}] completada"
+                            )
+                            chunk = Chunk(type=ChunkType.THINKING, content=f"{output}\n")
+                        case "summarizing_started":
+                            total_messages = data.get("total_messages", 0)
+                            chunk = Chunk(type=ChunkType.THINKING, content=f"\n📝 Resumiendo conversación (total mensajes: {total_messages})...\n")
+                        case "summarizing_completed":
+                            summary = data.get("summary", "")
+                            output = f"✅ Resumen completado:\n{summary}"
+                            chunk = Chunk(type=ChunkType.THINKING, content=f"{output}\n")
+                        case "execution_started":
+                            step = data.get("step", "")
+                            intent = data.get("intent", {})
+                            output = (
+                                f"\n🚀 Ejecutando paso: {step}\n"
+                                f"* Objetivo de la investigación: {intent.goal}\n"
+                                f"* Notas de la investigación: {intent.notes}\n"
+                            )
+                            chunk = Chunk(type=ChunkType.THINKING, content=output)
+                        case "execution_completed":
+                            response = data.get("response", None)
+                            output = f"✅ Ejecución del paso completada. Respuesta del agente: '{response}'\n"
+                            chunk = Chunk(type=ChunkType.THINKING, content=output)
                         case _:
                             # Otros eventos personalizados
-                            chunk = Chunk(type=ChunkType.THINKING, content=f"[{event_name}]: {data}\n")
+                            chunk = Chunk(type=ChunkType.THINKING, content=f"\n[{event_name}]: {data}\n")
 
                 case _:                    
                     #print(f"🔔 Evento no manejado: {kind} en nodo {node_name}")

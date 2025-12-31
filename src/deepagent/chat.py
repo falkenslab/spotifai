@@ -33,7 +33,7 @@ async def __handle_response(agent_name: str, response: AsyncGenerator[Chunk, Non
         if not thinking:
             print(__agent_prompt(agent_name) + " ", end="", flush=True)
         if chunk.type == "text" or verbose:
-            print(chunk.content, end="", flush=True)
+            print(f"\033[90m{chunk.content}\033[0m", end="", flush=True)
     print("\n")  # Nueva línea al final
 
 def chat(agent: DeepAgent, agent_name: str = "DeepAgent", human_name: str = "Tú", intro: str = "¡Hola!", verbose: bool = True) -> None:

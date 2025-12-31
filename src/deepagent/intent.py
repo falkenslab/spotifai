@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 class Intent(BaseModel):
     """Representa la intención derivada de un paso del plan."""
 
-    intent: str = Field(
+    goal: str = Field(
         description="Breve descripción del objetivo del paso",
         examples=["Buscar canciones de rock clásico", "Crear una playlist privada"]
     )
@@ -17,10 +17,10 @@ class Intent(BaseModel):
     )
 
     def __str__(self):
-        return f"Intent(intent={self.intent}, notes={self.notes})"
+        return f"Intent(goal={self.goal}, notes={self.notes})"
     
     def pretty_print(self):
         print("Intención:")
-        print(f"  - Objetivo: {self.intent}")
+        print(f"  - Objetivo: {self.goal}")
         if self.notes:
             print(f"  - Notas: {self.notes}")

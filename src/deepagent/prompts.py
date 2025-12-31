@@ -5,6 +5,7 @@ TEMPLATES = {
     "system": ("INSTRUCTIONS.md", ["domain", "tools", "tone"]),
     "plan": ("PLAN.md", ["domain"]),
     "research": ("RESEARCH.md", ["domain"]),
+    "executor": ("EXECUTOR.md", []),
 }
 
 class PromptFactory:

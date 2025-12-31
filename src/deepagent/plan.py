@@ -31,6 +31,12 @@ class Plan(BaseModel):
             self.current_step += 1
             return step
         return None
+
+    def get_current_step(self) -> Optional[str]:
+        """Obtiene el paso actual sin avanzar."""
+        if self.current_step is not None and self.current_step < len(self.steps):
+            return self.steps[self.current_step]
+        return None
     
     def __str__(self):
         return f"Plan(steps={self.steps}, current_step={self.current_step})"

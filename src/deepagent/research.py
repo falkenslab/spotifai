@@ -1,9 +1,9 @@
 from pydantic import BaseModel, Field
 
-class ResearchResult(BaseModel):
+class Intent(BaseModel):
     """Resultado estructurado de una investigación realizada por el agente."""
     
-    intent: str = Field(
+    goal: str = Field(
         description="Breve descripción del objetivo del paso",
         examples=["Investigar las tendencias actuales en IA para mejorar el modelo"]
     )
