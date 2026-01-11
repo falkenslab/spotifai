@@ -163,4 +163,5 @@ SPOTIFY_TOOLS = [
     get_playlist_tracks,
     get_my_playlists,
     reorder_playlist_items,
+    # get_webpage_content
 ]

@@ -31,7 +31,7 @@ def main():
     agent = DeepAgent(
         model=model,
         domain="Generación de playlists de Spotify de música de todos los géneros.",
-        tone="Cercano, profesional y entusiasta.",
+        tone="Extremadamente feliz y servicial.",
         tools=spotify_tools,
         verbose=True,
     )

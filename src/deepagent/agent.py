@@ -1,3 +1,4 @@
+import json
 from typing import AsyncGenerator, Optional
 
 from langchain.chat_models.base import BaseChatModel
@@ -10,7 +11,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.prebuilt import ToolNode
 
-from deepagent.state import AgentState
+from deepagent.state import AgentState, MESSAGES_REPLACE_SENTINEL
 from deepagent.chunk import Chunk, ChunkType
 from deepagent.prompts import PromptFactory
 from deepagent.plan import Plan
@@ -47,6 +48,8 @@ class DeepAgent:
             verbose: si es True, imprime mensajes de depuración y resultados de herramientas.
         """
 
+        self.mocked_tools = False   # Indica si las herramientas están siendo simuladas (mocked)
+
         self.tools = tools
         self.domain = domain
         self.tone = tone
@@ -59,7 +62,7 @@ class DeepAgent:
 
         # Configuración del grafo
         self.config : RunnableConfig = {
-            "recursionLimit": 50,      # Límite de recursión para evitar bucles infinitos en el grafo (para que no esté infinitamente dando vueltas)
+            "recursion_limit": 50,      # Límite de recursión para evitar bucles infinitos en el grafo (para que no esté infinitamente dando vueltas)
             "configurable": {
                 "thread_id": "1"        # Identificador del hilo de conversación (en este caso, 1 agente sólo puede mantener una conversación a la vez)
             },
@@ -95,12 +98,16 @@ class DeepAgent:
         # Definición del punto de entrada del grafo
         graph.set_entry_point("planner")
 
+        # Nombre del nodo de herramientas (mock o real)
+        tools_node_name = "tools_mock" if self.mocked_tools else "tools"
+
         # Definición de nodos del grafo
         graph.add_node("planner", self.__plan)          # Nodo de planificación: genera el plan de acción
         graph.add_node("researcher", self.__research)   # Nodo de investigación: investiga cada paso del plan
         graph.add_node("summarizer", self.__summarize)  # Nodo de resumen: resume la conversación hasta ahora (si es necesario)
         graph.add_node("executor", self.__executor)     # Nodo de ejecución: determina qué herramientas hay que ejecutar
         graph.add_node("tools", ToolNode(self.tools))   # Nodo de herramientas: ejecuta herramientas solicitadas por el agente
+        graph.add_node("tools_mock", self.__tools_mock) # Nodo de herramientas (mock): simula la ejecución de herramientas (testing)
         graph.add_node("critic", self.__critic)         # Nodo de juicio: decide si continuar o finalizar
         graph.add_node("finalizer", self.__finalize)    # Nodo de síntesis final: genera la respuesta final
 
@@ -115,9 +122,12 @@ class DeepAgent:
         graph.add_conditional_edges(
             "executor",                                 # La arista condicional sale del nodo "executor"
             self.__need_tools,                          # Función que decide si se deben ejecutar herramientas o resumir
-            {True: "tools", False: "critic"}            # Si el modelo pide herramientas, ir al nodo de herramientas; si no, al nodo de juicio
+            {True: tools_node_name, False: "critic"}    # Si el modelo pide herramientas, ir al nodo de herramientas; si no, al nodo de juicio
         )
-        graph.add_edge("tools", "executor")             # Desde las herramientas, ir al nodo de ejecución
+        if not self.mocked_tools:
+            graph.add_edge("tools", "executor")             # Desde las herramientas, ir al nodo de ejecución
+        else:
+            graph.add_edge("tools_mock", "executor")        # Desde las herramientas (mock), ir al nodo de ejecución
         graph.add_conditional_edges(
             "critic",                                   # La arista condicional sale del nodo "critic"
             self.__need_more_steps,                     # Función que decide si se deben investigar más pasos
@@ -157,7 +167,6 @@ class DeepAgent:
 
         return {
             "plan": plan,
-            "messages": state.get("messages", []) + [AIMessage(content=f"He generado un plan de acción con {len(plan.steps)} pasos: {plan}")]  
         }
 
 
@@ -185,11 +194,17 @@ class DeepAgent:
                 }
             ))
             structured_model : BaseChatModel[Intent] = self.model.with_structured_output(Intent)
-            intent = structured_model.invoke([
-                self.system_prompt,
-                reasearch_prompt,
-                HumanMessage(content=f"Paso del plan a analizar: {step}."),
-            ], config=config)
+            intent = structured_model.invoke(
+                [
+                    self.system_prompt,
+                    reasearch_prompt,
+                    HumanMessage(content=(
+                        f"Objetivo del usuario: {self.human_query.content}\n"
+                        f"Paso del plan a analizar: {step}\n"
+                    )),
+                ],
+                config=config,
+            )
         else:
             intent = Intent(
                 goal="Ninguno",
@@ -202,8 +217,8 @@ class DeepAgent:
         }, config=config)
 
         return {
-            "plan": plan, 
             "scratch": {
+                "step": step,
                 "intent": intent
             },
         }
@@ -220,32 +235,36 @@ class DeepAgent:
             "total_messages": len(state.get("messages", []))
         }, config=config)
 
-        summary_prompt = HumanMessage(content="Resume en 5-8 líneas lo importante para seguir ejecutando. Devuelve texto.")
+        summary_prompt = HumanMessage(
+            content="Resume en 5-8 líneas lo importante para seguir ejecutando. Devuelve texto."
+        )
         summary: AIMessage = self.model.invoke(state.get("messages", []) + [summary_prompt], config=config)
 
         dispatch_custom_event("summarizing_completed", {
             "summary": summary.content
         }, config=config)
 
-        # Reemplazar todos los mensajes con el system_prompt, la query original y el resumen
+        # Reemplazar todos los mensajes con el system_prompt, la query original y el resumen        
         return {
             "messages": [
+                SystemMessage(content=MESSAGES_REPLACE_SENTINEL),
                 self.system_prompt,
                 self.human_query,
-                SystemMessage(content=summary.content)
-            ]
+                SystemMessage(content=summary.content),
+            ]        
         }
 
 
     # -----------------------------------------------------------
-    # Nodo que determina que herramientas ejecutar
+    # Nodo que determina que realiza acciones
     # -----------------------------------------------------------
 
     def __executor(self, state: AgentState, config: RunnableConfig) -> AgentState:
         """Decide la siguiente acción del agente: continuar investigando o sintetizar resultados."""
 
-        step : Optional[str] = state.get("plan").get_current_step()
         intent : Intent = state.get("scratch", {}).get("intent")
+        step : Optional[str] = state.get("scratch", {}).get("step")
+        messages = state.get("messages", [])
 
         dispatch_custom_event("execution_started", {
             "step": step if step else "",
@@ -256,26 +275,54 @@ class DeepAgent:
             "executor",
             {}
         ))
-        input_message = HumanMessage(content=f"""
-            Objetivo: {self.human_query.content}.
+        query = HumanMessage(content=f"""
+            Objetivo: {self.human_query.content}
             Paso actual: {step}
             Análisis del paso:
-            * Objetivo de la investigación: {intent.goal}
-            * Notas de la investigación: {intent.notes}
+            - Objetivo de la investigación: {intent.goal}
+            - Notas de la investigación: {intent.notes}
         """)
-        response: AnyMessage = self.model_with_tools.invoke([
-            self.system_prompt,
-            executor_prompt, 
-            input_message
-        ], config=config)
+        ai_response: AnyMessage = self.model_with_tools.invoke(
+            messages + [ executor_prompt, query ],
+            config=config
+        )
+
+        ai_response.pretty_print()
 
         dispatch_custom_event("execution_completed", {
-            "response": response.content
+            "response": ai_response.content
         }, config=config)
 
         return {
-            "messages": state.get("messages", []) + [response]
+            "messages": [ai_response]
         }
+
+
+    # -----------------------------------------------------------
+    # Nodo de tools (mock): simula la ejecución de las tools (testing)
+    # -----------------------------------------------------------
+
+    def __tools_mock(self, state: AgentState, config: RunnableConfig) -> AgentState:
+        last = (state.get("messages") or [])[-1]
+
+        tool_messages: list[ToolMessage] = []
+
+        if isinstance(last, AIMessage) and getattr(last, "tool_calls", None):
+            for tc in last.tool_calls:
+                # `tc` suele ser dict-like: {"name": "...", "args": {...}, "id": "..."}
+                name = tc.get("name", "unknown_tool")
+                args = tc.get("args", {})
+                tc_id = tc.get("id", "")
+
+                payload = json.dumps(args, ensure_ascii=False)
+                content = f"[MOCK] Ejecutaría: {name}({payload})"
+
+                tool_message = ToolMessage(content=content, tool_call_id=tc_id)
+                tool_message.pretty_print()
+                
+                tool_messages.append(tool_message)
+
+        return {"messages": tool_messages}
 
 
     # -----------------------------------------------------------
@@ -284,9 +331,15 @@ class DeepAgent:
 
     def __critic(self, state: AgentState, config: RunnableConfig) -> AgentState:
         """Evalúa el progreso del agente y decide si continuar o finalizar."""
+
+        print("toma pastillas de goma!!! estoy en el criticón!")
+        messages = state.get("messages", [])
+        for message in messages:
+            message.pretty_print()
+
         dispatch_custom_event("critic_started", {}, config=config)
         dispatch_custom_event("critic_completed", {}, config=config)
-        return state
+        return {}
 
 
     # -----------------------------------------------------------
@@ -297,7 +350,7 @@ class DeepAgent:
         """Sintetiza los resultados de la investigación en una respuesta final."""
         dispatch_custom_event("finalizing_started", {}, config=config)
         dispatch_custom_event("finalizing_completed", {}, config=config)
-        return state
+        return {}
 
 
     # -----------------------------------------------------------
