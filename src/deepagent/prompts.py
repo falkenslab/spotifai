@@ -1,5 +1,5 @@
 from pathlib import Path
-from langchain_core.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate, ChatPromptTemplate
 
 TEMPLATES = {
     "system": ("INSTRUCTIONS.md", ["domain", "tools", "tone"]),

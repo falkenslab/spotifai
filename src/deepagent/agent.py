@@ -37,6 +37,7 @@ class DeepAgent:
         tone: str,
         tools: list[tool],
         verbose: bool = False,
+        mocked_tools: bool = False,
     ):
         """
         Inicializa el agente con un modelo, herramientas y un prompt de sistema.
@@ -46,13 +47,13 @@ class DeepAgent:
             tone: tono de comunicación del agente.
             tools: lista de herramientas compatibles con LangChain a exponer al modelo.
             verbose: si es True, imprime mensajes de depuración y resultados de herramientas.
+            mocked_tools: si es True, simula la ejecución de herramientas sin llamarlas realmente.
         """
-
-        self.mocked_tools = False   # Indica si las herramientas están siendo simuladas (mocked)
 
         self.tools = tools
         self.domain = domain
         self.tone = tone
+        self.mocked_tools = mocked_tools   # Indica si las herramientas están siendo simuladas (mocked)
 
         # Descripción de las herramientas disponibles
         self.tools_description = generate_tools_description(self.tools)
@@ -98,16 +99,16 @@ class DeepAgent:
         # Definición del punto de entrada del grafo
         graph.set_entry_point("planner")
 
-        # Nombre del nodo de herramientas (mock o real)
-        tools_node_name = "tools_mock" if self.mocked_tools else "tools"
-
         # Definición de nodos del grafo
         graph.add_node("planner", self.__plan)          # Nodo de planificación: genera el plan de acción
         graph.add_node("researcher", self.__research)   # Nodo de investigación: investiga cada paso del plan
         graph.add_node("summarizer", self.__summarize)  # Nodo de resumen: resume la conversación hasta ahora (si es necesario)
         graph.add_node("executor", self.__executor)     # Nodo de ejecución: determina qué herramientas hay que ejecutar
-        graph.add_node("tools", ToolNode(self.tools))   # Nodo de herramientas: ejecuta herramientas solicitadas por el agente
-        graph.add_node("tools_mock", self.__tools_mock) # Nodo de herramientas (mock): simula la ejecución de herramientas (testing)
+        graph.add_node("tools", ToolNode(self.tools)    # Nodo de herramientas: ejecuta herramientas solicitadas por el agente
+                       if not self.mocked_tools 
+                       else self.__tools_mock
+        )   
+        graph.add_node("ask_user", self.__ask_user)     # Nodo de interacción con el usuario: solicita información adicional al usuario
         graph.add_node("critic", self.__critic)         # Nodo de juicio: decide si continuar o finalizar
         graph.add_node("finalizer", self.__finalize)    # Nodo de síntesis final: genera la respuesta final
 
@@ -122,12 +123,9 @@ class DeepAgent:
         graph.add_conditional_edges(
             "executor",                                 # La arista condicional sale del nodo "executor"
             self.__need_tools,                          # Función que decide si se deben ejecutar herramientas o resumir
-            {True: tools_node_name, False: "critic"}    # Si el modelo pide herramientas, ir al nodo de herramientas; si no, al nodo de juicio
+            {True: "tools", False: "critic"}            # Si el modelo pide herramientas, ir al nodo de herramientas; si no, al nodo de juicio
         )
-        if not self.mocked_tools:
-            graph.add_edge("tools", "executor")             # Desde las herramientas, ir al nodo de ejecución
-        else:
-            graph.add_edge("tools_mock", "executor")        # Desde las herramientas (mock), ir al nodo de ejecución
+        graph.add_edge("tools", "executor")             # Desde las herramientas, ir al nodo de ejecución
         graph.add_conditional_edges(
             "critic",                                   # La arista condicional sale del nodo "critic"
             self.__need_more_steps,                     # Función que decide si se deben investigar más pasos
@@ -150,15 +148,17 @@ class DeepAgent:
         dispatch_custom_event("planning_started", {}, config=config)
 
         # Construir el mensaje de sistema para la planificación
-        plan_prompt = SystemMessage(content=PromptFactory.render("plan", {"domain": self.domain}))
+        planner_prompt = SystemMessage(content=PromptFactory.render("plan", {"domain": self.domain}))
 
         # Invocar el modelo para obtener el plan
-        structured_model : BaseChatModel[Plan] = self.model.with_structured_output(Plan)
-        plan : Plan = structured_model.invoke([
-            self.system_prompt,
-            plan_prompt, 
-            self.human_query
-        ], config=config)
+        plan : Plan = self.model.with_structured_output(Plan).invoke(
+            [
+                self.system_prompt,
+                planner_prompt, 
+                self.human_query
+            ], 
+            config=config
+        )
 
         # Emitir evento de planificación completada
         dispatch_custom_event("planning_completed", {
@@ -187,21 +187,21 @@ class DeepAgent:
         }, config=config)
 
         if step:
-            reasearch_prompt = SystemMessage(content=PromptFactory.render(
+            researcher_prompt = SystemMessage(content=PromptFactory.render(
                 "research", 
                 {
                     "domain": self.domain
                 }
             ))
-            structured_model : BaseChatModel[Intent] = self.model.with_structured_output(Intent)
-            intent = structured_model.invoke(
+            research_query_prompt = HumanMessage(content=f"""
+                Objetivo del usuario: {self.human_query.content}
+                Paso del plan a analizar: {step}
+            """)
+            intent = self.model.with_structured_output(Intent).invoke(
                 [
                     self.system_prompt,
-                    reasearch_prompt,
-                    HumanMessage(content=(
-                        f"Objetivo del usuario: {self.human_query.content}\n"
-                        f"Paso del plan a analizar: {step}\n"
-                    )),
+                    researcher_prompt,
+                    research_query_prompt,
                 ],
                 config=config,
             )
@@ -235,10 +235,13 @@ class DeepAgent:
             "total_messages": len(state.get("messages", []))
         }, config=config)
 
+        messages = state.get("messages", [])
+
         summary_prompt = HumanMessage(
             content="Resume en 5-8 líneas lo importante para seguir ejecutando. Devuelve texto."
         )
-        summary: AIMessage = self.model.invoke(state.get("messages", []) + [summary_prompt], config=config)
+        
+        summary: AIMessage = self.model.invoke(messages + [summary_prompt], config=config)
 
         dispatch_custom_event("summarizing_completed", {
             "summary": summary.content
@@ -260,7 +263,12 @@ class DeepAgent:
     # -----------------------------------------------------------
 
     def __executor(self, state: AgentState, config: RunnableConfig) -> AgentState:
-        """Decide la siguiente acción del agente: continuar investigando o sintetizar resultados."""
+        """
+        Decide la siguiente acción del agente:
+        * Ejecutar una herramienta.
+        * Pedir más información.
+        * Finalizar la ejecución.
+        """
 
         intent : Intent = state.get("scratch", {}).get("intent")
         step : Optional[str] = state.get("scratch", {}).get("step")
@@ -281,8 +289,9 @@ class DeepAgent:
             Análisis del paso:
             - Objetivo de la investigación: {intent.goal}
             - Notas de la investigación: {intent.notes}
+            Decide la siguiente acción a tomar.
         """)
-        ai_response: AnyMessage = self.model_with_tools.invoke(
+        ai_response: AnyMessage = self.model_with_tools.with_structured_output(dict).invoke(
             messages + [ executor_prompt, query ],
             config=config
         )
@@ -297,6 +306,20 @@ class DeepAgent:
             "messages": [ai_response]
         }
 
+    # -----------------------------------------------------------
+    # Nodo para preguntar al usuario (human in the loop)
+    # -----------------------------------------------------------
+
+    def __ask_user(self, state: AgentState, config: RunnableConfig) -> AgentState:
+        """Solicita información adicional al usuario cuando el agente lo requiere."""
+        dispatch_custom_event("ask_user_started", {}, config=config)
+
+        state.scratch["awaiting_user_input"] = True
+        question = state.scratch["question"]
+
+
+        dispatch_custom_event("ask_user_completed", {}, config=config)
+        return {}
 
     # -----------------------------------------------------------
     # Nodo de tools (mock): simula la ejecución de las tools (testing)

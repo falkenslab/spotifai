@@ -22,11 +22,12 @@ class SpotifyManager:
             redirect_uri=SPOTIPY_REDIRECT_URI,
             scope=" ".join(
                 [
-                    "user-library-read",
-                    "playlist-read-private",
-                    "playlist-read-collaborative",
-                    "playlist-modify-public",
-                    "playlist-modify-private",
+                    "user-library-read",            # Leer canciones, álbumes o episodios guardados por el usuario.
+                    "playlist-read-private",        # Leer listas de reproducción privadas del usuario.
+                    "playlist-read-collaborative",  # Leer listas de reproducción colaborativas del usuario.
+                    "playlist-modify-public",       # Modificar listas de reproducción públicas del usuario.
+                    "playlist-modify-private",      # Modificar listas de reproducción privadas del usuario.
+                    "ugc-image-upload",             # Subir imágenes de contenido generado por el usuario.
                 ]
             ),
             cache_path=SPOTIPY_CACHE_PATH,
