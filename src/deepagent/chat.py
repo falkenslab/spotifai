@@ -49,12 +49,16 @@ def chat(agent: DeepAgent, agent_name: str = "DeepAgent", human_name: str = "Tú
     try:
         print(f"\n{__agent_prompt(agent_name)} {intro}\n")
 
+        def ask_user(question: str) -> str:
+            print(f"\n{__agent_prompt(agent_name)} {question}")
+            return input(__user_prompt(human_name) + " ")
+
         while True:
             human_input = input(__user_prompt(human_name) + " ")
             if human_input.lower() == "salir":
                 break
             print()
-            agent_response = agent.invoke(human_input)
+            agent_response = agent.invoke(human_input, ask_user_fn=ask_user)
             asyncio.run(__handle_response(agent_name, agent_response, verbose=verbose))
     except KeyboardInterrupt:
         print(f"\n\n{__agent_prompt(agent_name)}", f"¡Chao {human_name}!")

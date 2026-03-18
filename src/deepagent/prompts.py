@@ -6,6 +6,8 @@ TEMPLATES = {
     "plan": ("PLAN.md", ["domain"]),
     "research": ("RESEARCH.md", ["domain"]),
     "executor": ("EXECUTOR.md", []),
+    "critic": ("CRITIC.md", []),
+    "finalizer": ("FINALIZER.md", []),
 }
 
 class PromptFactory:
@@ -58,7 +60,7 @@ class PromptFactory:
         return cls.create(filename, variables)
 
     @classmethod
-    def render(cls, name: str, variables: dict) -> str:
+    def render(cls, name: str, variables: dict = {}) -> str:
         """
         Renderiza una plantilla predefinida con las variables proporcionadas.
         Args:

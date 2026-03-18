@@ -4,6 +4,7 @@ from enum import Enum
 class ChunkType(Enum):
     TEXT = "text"
     THINKING = "thinking"
+    QUESTION = "question"
 
 class Chunk(BaseModel):
 

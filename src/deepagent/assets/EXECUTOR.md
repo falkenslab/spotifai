@@ -19,8 +19,8 @@ La entrada son los detalles del paso actual del plan con la siguiente informaci�
 * Objetivo (petición del usuario)
 * Paso actual
 * Análisis del paso
-    * Objetivo de la investigación: {intent.goal}
-    * Notas de la investigación: {intent.notes}
+    * Objetivo de la investigación
+    * Notas de la investigación
 
 ## Salida
 
@@ -44,4 +44,3 @@ Solo devuelve el JSON la respuesta o la pregunta.
 - Asegúrate de que el JSON esté bien formado y sea válido.
 - Si decides pedir más información al usuario, sé específico en la razón.
 - Si decides finalizar, proporciona una razón clara y concisa.
-- Adapta tu respuesta al dominio de especialización siguiente: {domain}.
