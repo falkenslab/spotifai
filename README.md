@@ -2,7 +2,9 @@
 
 Generador de playlists de Spotify con IA. Interactúa en modo chat para buscar canciones, crear y gestionar playlists usando la API de Spotify y un modelo de lenguaje (OpenAI u otros compatibles con LangChain).
 
-> 🚧🧑‍💻 Aún estamos desarrollando esto, ¡se paciente!
+> 😒 Se ha abandonado el desarrollo del agente debido al cambio en las políticas de Spotify en cuanto al acceso a su Web API desde cuentas gratuitas. 
+
+> Sin embargo, es posible aprovechar el módulo `src/deepagent` para implementar otro tipo de agentes inteligentes.
 
 ## Características
 
